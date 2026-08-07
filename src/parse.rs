@@ -39,7 +39,11 @@ pub async fn parse_block_trace(provider: Provider<Http>, number: usize) -> Block
         if let Some(trace) = &trace.vm_trace {
             let mut transaction_access = Vec::new();
             parse_trace(trace, contract, &mut transaction_access, number);
-            block_accesses.push(transaction_access);
+            block_accesses.push((if receipt.contract_address.is_some() {
+                super::TransactionType::Contract
+            } else {
+                super::TransactionType::Regular
+            }, transaction_access));
         }
     }
     block_accesses

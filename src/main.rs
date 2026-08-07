@@ -51,7 +51,13 @@ pub enum DBAccess {
     Write(SlotKey, U256),
 }
 
-pub type TransactionAccess = Vec<DBAccess>;
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub enum TransactionType {
+    Contract,
+    Regular,
+}
+
+pub type TransactionAccess = (TransactionType, Vec<DBAccess>);
 
 pub type BlockAccess = Vec<TransactionAccess>;
 
@@ -81,7 +87,7 @@ async fn fetch_main(opts: &FetchOptions) {
     let mut accesses_cnt: usize = 0;
     while let Some(results) = set.join_next().await {
         let (accesses, x) = results.unwrap();
-        accesses_cnt += accesses.iter().map(|x| x.len()).sum::<usize>();
+        accesses_cnt += accesses.iter().map(|x| x.1.len()).sum::<usize>();
         answers[x] = accesses;
     }
 
@@ -191,34 +197,73 @@ fn seal(opts: &SealOptions) {
 
     let mut frontier = HashMap::<SlotKey, U256>::new();
     let mut touched = HashSet::<SlotKey>::new();
-    let mut access_stat = HashMap::<SlotKey, (usize, usize)>::new();
+    let mut access_stat = HashMap::<SlotKey, (usize, usize, usize)>::new(); // (reads, writes, updates)
+    let mut written_slots = HashSet::<SlotKey>::new();
 
-    for x in answer.iter().flatten().flatten() {
-        match x {
-            DBAccess::Read(slot, value) if !touched.contains(slot) => {
-                touched.insert(slot.clone());
-                if !value.is_zero() {
-                    frontier.insert(slot.clone(), value.clone());
+    for tx in answer.iter().flatten() {
+        for x in &tx.1 {
+            match x {
+                DBAccess::Read(slot, value) if !touched.contains(&slot) => {
+                    touched.insert(slot.clone());
+                    if !value.is_zero() {
+                        frontier.insert(slot.clone(), value.clone());
+                    }
+                    access_stat.entry(slot.clone()).or_default().0 += 1;
                 }
-                access_stat.entry(slot.clone()).or_default().0 += 1;
-            }
-            DBAccess::Read(slot, _) => {
-                access_stat.entry(slot.clone()).or_default().0 += 1;
-            }
-            DBAccess::Write(slot, _) => {
-                touched.insert(slot.clone());
-                access_stat.entry(slot.clone()).or_default().1 += 1;
+                DBAccess::Read(slot, _) => {
+                    access_stat.entry(slot.clone()).or_default().0 += 1;
+                }
+                DBAccess::Write(slot, _) => {
+                    touched.insert(slot.clone());
+                    if written_slots.contains(&slot) {
+                        access_stat.entry(slot.clone()).or_default().2 += 1; // update
+                    } else {
+                        written_slots.insert(slot.clone());
+                        access_stat.entry(slot.clone()).or_default().1 += 1; // write
+                        access_stat.entry(slot.clone()).or_default().2 += 1; // update
+                    }
+                }
             }
         }
     }
 
     println!(
-        "Blocks {}, txs {}, ops {}",
+        "Blocks {}, txs {}, contracts {}, ops {}",
         answer.len(),
-        answer.iter().map(|x| x.len()).sum::<usize>(),
-        answer.iter().flatten().map(|x| x.len()).sum::<usize>()
+        answer.iter().flatten().map(|x| x.1.len()).sum::<usize>(),
+        answer.iter().flatten().filter(|x| (**x).0 == TransactionType::Contract).map(|x| x.1.len()).sum::<usize>(),
+        answer.iter().flatten().map(|x| x.1.len()).sum::<usize>(),
     );
     println!("Touched set {}, init set {}", touched.len(), frontier.len());
+
+    // Calculate access distribution
+    let mut read_distribution = HashMap::<usize, usize>::new();
+    let mut write_distribution = HashMap::<usize, usize>::new();
+    let mut update_distribution = HashMap::<usize, usize>::new();
+    for (_, (reads, _writes, updates)) in &access_stat {
+        *read_distribution.entry(*reads).or_insert(0) += 1;
+        *write_distribution.entry(*_writes).or_insert(0) += 1;
+        *update_distribution.entry(*updates).or_insert(0) += 1;
+    }
+
+    let mut read_vec: Vec<_> = read_distribution.iter().collect();
+    read_vec.sort_unstable_by_key(|(count, _)| *count);
+    println!("\nRead distribution (read_count -> num_keys):");
+    for (count, num_keys) in read_vec {
+        if (*count) > 0 {
+            println!("  {} reads: {} keys", count, num_keys);
+        }
+    }
+
+    
+    let mut update_vec: Vec<_> = update_distribution.iter().collect();
+    update_vec.sort_unstable_by_key(|(count, _)| *count);
+    println!("\nUpdate distribution (update_count -> num_keys):");
+    for (count, num_keys) in update_vec {
+        if (*count) > 0 {
+            println!("  {} updates: {} keys", count, num_keys);
+        }
+    }
 
     let mut init_task: Vec<_> = frontier
         .drain()
@@ -226,60 +271,22 @@ fn seal(opts: &SealOptions) {
         .collect();
     init_task.shuffle(&mut rand::thread_rng());
 
-    let io_task = answer
-        .into_iter()
-        .map(|block| {
-            let mut ops = HashMap::<SlotKey, Vec<DBAccess>>::new();
-            block.into_iter().flatten().for_each(|x| match &x {
-                DBAccess::Read(slot, _) | DBAccess::Write(slot, _) => {
-                    ops.entry(slot.clone()).or_insert(vec![]).push(x)
-                }
-            });
-
-            let mut reads = Vec::new();
-            let mut writes = Vec::new();
-
-            for (_, rw_array) in ops {
-                if let Some(DBAccess::Read(slot, _)) = rw_array.first() {
-                    reads.push(ExperimentTask::Read(slot.digest()))
-                }
-                if let Some(DBAccess::Write(slot, value)) = rw_array
-                    .iter()
-                    .rev()
-                    .filter(|x| matches!(x, DBAccess::Write(_, _)))
-                    .next()
-                {
-                    writes.push(ExperimentTask::Write(slot.digest(), u256_to_bytes(&value)))
-                }
-            }
-
-            let mut answer = reads;
-            answer.extend_from_slice(&writes);
-            answer
-        })
-        .collect::<Vec<_>>();
-
-    let (read_cnt, write_cnt) =
-        io_task
-            .iter()
-            .flatten()
-            .fold((0usize, 0usize), |(r, w), x| match x {
-                ExperimentTask::Read(..) => (r + 1, w),
-                ExperimentTask::Write(..) => (r, w + 1),
-            });
-    println!("Final task {} r {} w", read_cnt, write_cnt);
+    let (read_cnt, write_cnt, update_cnt) = access_stat
+        .iter()
+        .fold((0, 0, 0), |(r_acc, w_acc, u_acc), (_, (r, w, u))| {
+            (r_acc + r, w_acc + w, u_acc + u)
+        });
+    println!("Final task {} r {} w {} u", read_cnt, write_cnt, update_cnt - write_cnt);
 
     fs::create_dir_all(&opts.output).unwrap();
 
-    write_to_file(&init_task, Path::new(&opts.output).join("real_trace.init"));
-    write_to_file(&io_task, Path::new(&opts.output).join("real_trace.data"));
+    let mut stat_vec = access_stat.iter().collect::<Vec<_>>();
+    stat_vec.sort_unstable_by_key(|(_, (x, y, z))| x + y + z);
 
-    // let mut stat_vec = access_stat.iter().collect::<Vec<_>>();
-    // stat_vec.sort_unstable_by_key(|(_, (x, y))| x + y);
-
-    // for (slot, (reads, writes)) in stat_vec.iter().rev().take(1000) {
-    //     println!("{:?}, {} r {} w", slot, reads, writes);
-    // }
+    println!("\nTop 1000 keys by total accesses (address, slot, reads, writes, updates):");
+    for (slot, (reads, writes, updates)) in stat_vec.iter().rev().take(1000) {
+        println!("{:?}, {} r {} w {} u", slot, reads, writes, updates);
+    }
 }
 
 #[tokio::main]
