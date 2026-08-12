@@ -7,7 +7,7 @@ pub fn pop_num(op: &Opcode) -> usize {
         STOP => 0,
         ADD | MUL | SUB | DIV | SDIV | MOD | SMOD | EXP | SIGNEXTEND => 2,
         ADDMOD | MULMOD => 3,
-        ISZERO | NOT => 1,
+        ISZERO | NOT | CLZ => 1,
         LT | GT | SLT | SGT | EQ | AND | OR | XOR | BYTE | SHL | SHR | SAR | SHA3 => 2,
         BALANCE | CALLDATALOAD | EXTCODESIZE | EXTCODEHASH => 1,
         CALLDATACOPY | CODECOPY | RETURNDATACOPY => 3,
