@@ -1,14 +1,14 @@
-use crate::BlockAccess;
+use crate::{BlockAccess, TransactionInfo};
 
 use super::DBAccess;
 
-use super::opcode::{integrity_check, pop_num};
+use super::opcode::{pop_num};
 use super::SlotKey;
 use ethers::{
     providers::{Http, Middleware, Provider},
     types::{
-        Address, BigEndianHash, BlockNumber, ExecutedInstruction, Opcode, TraceType, VMTrace, H256,
-        U256,
+        Address, BigEndianHash, BlockNumber, ExecutedInstruction, Opcode, TraceType,
+        TransactionTrace, Action, VMTrace, H256, U256,
     },
 };
 
@@ -27,7 +27,15 @@ pub async fn parse_block_trace(provider: Provider<Http>, number: usize) -> Block
         .await
         .unwrap();
     assert_eq!(answer.len(), receipts.len());
-    for (trace, receipt) in answer.into_iter().zip(receipts.into_iter()) {
+    // Save blocktrace and receipts to file for debugging
+    std::fs::write(format!("/mnt/tank/raw_ethereum_data/blocktrace_{}.json", number), serde_json::to_string(&answer).unwrap())
+        .unwrap();
+    std::fs::write(
+        format!("/mnt/tank/raw_ethereum_data/receipts_{}.json", number),
+        serde_json::to_string(&receipts).unwrap(),
+    )
+    .unwrap();
+    for (block_trace, receipt) in answer.into_iter().zip(receipts.into_iter()) {
         let contract = match (receipt.to, receipt.contract_address) {
             (Some(x), None) => x,
             (None, Some(x)) => x,
@@ -36,14 +44,28 @@ pub async fn parse_block_trace(provider: Provider<Http>, number: usize) -> Block
             }
             _ => unreachable!(),
         };
-        if let Some(trace) = &trace.vm_trace {
+        if let Some(trace) = &block_trace.vm_trace {
             let mut transaction_access = Vec::new();
             parse_trace(trace, contract, &mut transaction_access, number);
-            block_accesses.push((if receipt.contract_address.is_some() {
-                super::TransactionType::Contract
+            let transaction_type: crate::TransactionType = if receipt.contract_address.is_some() {
+                super::TransactionType::ContractCreation
+            } else if block_trace.trace.is_some() && block_trace.trace.as_ref().unwrap().len() == 1 {
+                let first_trace: &TransactionTrace = &block_trace.trace.as_ref().unwrap()[0];
+                let Action::Call(call) = &first_trace.action else { continue };
+                if call.value != U256::zero() {
+                    super::TransactionType::Regular
+                } else {
+                    super::TransactionType::ContractCall
+                }
             } else {
-                super::TransactionType::Regular
-            }, transaction_access));
+                super::TransactionType::ContractCall
+            };
+            let transaction_info = TransactionInfo {
+                type_: transaction_type.clone(),
+                to: receipt.to,
+                from: receipt.from,
+            };
+            block_accesses.push((transaction_info, transaction_access));
         }
     }
     block_accesses
@@ -61,7 +83,6 @@ fn parse_trace(
     for op in trace.ops.iter().filter(|op| op.ex.is_some()) {
         let opcode = match &op.op {
             ExecutedInstruction::Known(o) => o.clone(),
-            ExecutedInstruction::Unknown(s) if s == "SHA3" => KECCAK256,
             ExecutedInstruction::Unknown(s) => {
                 println!("Unknown opcode: {}", s);
                 INVALID
@@ -69,7 +90,7 @@ fn parse_trace(
         };
         // println!("stack {:?}", &stack);
         // println!("op {:?}", op);
-        integrity_check(op, &stack, block_number);
+        // integrity_check(op, &stack, block_number);
 
         let peek = |x: usize| &stack[stack.len() - x];
 

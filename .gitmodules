@@ -1,3 +1,0 @@
-[submodule "ethers-rs"]
-    path = "ethers-rs"
-    url = "https://github.com/ChenxingLi/ethers-rs.git"

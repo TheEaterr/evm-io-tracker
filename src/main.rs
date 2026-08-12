@@ -5,8 +5,7 @@ use opts::{CombineOptions, FetchOptions, SealOptions};
 use parse::parse_block_trace;
 
 use ethers::{
-    providers::{Http, Provider},
-    types::{Address, U256},
+    providers::{Http, Provider}, types::{Address, H160, U256}
 };
 use postcard::{from_bytes, to_stdvec};
 use rand::seq::SliceRandom;
@@ -53,11 +52,19 @@ pub enum DBAccess {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub enum TransactionType {
-    Contract,
+    ContractCreation,
+    ContractCall,
     Regular,
 }
 
-pub type TransactionAccess = (TransactionType, Vec<DBAccess>);
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub struct TransactionInfo {
+    pub type_: TransactionType,
+    pub to: Option<Address>,
+    pub from: Address,
+}
+
+pub type TransactionAccess = (TransactionInfo, Vec<DBAccess>);
 
 pub type BlockAccess = Vec<TransactionAccess>;
 
@@ -225,13 +232,36 @@ fn seal(opts: &SealOptions) {
                 }
             }
         }
+        // add the from and to db operations
+        for addr in [tx.0.from, tx.0.to.unwrap_or_default()] {
+            if addr == Address::zero() {
+                continue;
+            }
+            let slot = SlotKey {
+                address: addr,
+                slot: U256::zero(),
+            };
+            if !touched.contains(&slot) {
+                written_slots.insert(slot.clone());
+                touched.insert(slot.clone());
+                access_stat.entry(slot.clone()).or_default().0 += 1;
+                access_stat.entry(slot.clone()).or_default().1 += 1;
+                frontier.insert(slot.clone(), U256::zero());
+            } else {
+                access_stat.entry(slot.clone()).or_default().0 += 1;
+                access_stat.entry(slot.clone()).or_default().2 += 1; // update
+            }
+        }
+        
     }
 
     println!(
-        "Blocks {}, txs {}, contracts {}, ops {}",
+        "Blocks {}, txs {}, regular {}, contract creations {}, contract calls {}, ops {}",
         answer.len(),
-        answer.iter().flatten().map(|x| x.1.len()).sum::<usize>(),
-        answer.iter().flatten().filter(|x| (**x).0 == TransactionType::Contract).map(|x| x.1.len()).sum::<usize>(),
+        answer.iter().map(|x| x.len()).sum::<usize>(),
+        answer.iter().flatten().filter(|x| (**x).0.type_ == TransactionType::Regular).count(),
+        answer.iter().flatten().filter(|x| (**x).0.type_ == TransactionType::ContractCreation).count(),
+        answer.iter().flatten().filter(|x| (**x).0.type_ == TransactionType::ContractCall).count(),
         answer.iter().flatten().map(|x| x.1.len()).sum::<usize>(),
     );
     println!("Touched set {}, init set {}", touched.len(), frontier.len());
@@ -269,7 +299,7 @@ fn seal(opts: &SealOptions) {
         .drain()
         .map(|(key, value)| (key.digest(), u256_to_bytes(&value)))
         .collect();
-    init_task.shuffle(&mut rand::thread_rng());
+    init_task.shuffle(&mut rand::rng());
 
     let (read_cnt, write_cnt, update_cnt) = access_stat
         .iter()
@@ -283,9 +313,121 @@ fn seal(opts: &SealOptions) {
     let mut stat_vec = access_stat.iter().collect::<Vec<_>>();
     stat_vec.sort_unstable_by_key(|(_, (x, y, z))| x + y + z);
 
-    println!("\nTop 1000 keys by total accesses (address, slot, reads, writes, updates):");
-    for (slot, (reads, writes, updates)) in stat_vec.iter().rev().take(1000) {
-        println!("{:?}, {} r {} w {} u", slot, reads, writes, updates);
+    // println!("\nTop 1000 keys by total accesses (address, slot, reads, writes, updates):");
+    // for (slot, (reads, writes, updates)) in stat_vec.iter().rev().take(1000) {
+    //     println!("{:?}, {} r {} w {} u", slot, reads, writes, updates);
+    // }
+
+
+    // Calculate statistics for to and from for regular transactions
+    let mut to_stat = HashMap::<Address, usize>::new();
+    let mut from_stat = HashMap::<Address, usize>::new();
+    for tx in answer.iter().flatten() {
+        if tx.0.type_ == TransactionType::Regular {
+            if let Some(to) = tx.0.to {
+                *to_stat.entry(to).or_insert(0) += 1;
+            } else {
+                println!("Regular transaction with no 'to' address: {:?}", tx.0);
+            }
+            *from_stat.entry(tx.0.from).or_insert(0) += 1;
+        }
+    }
+    // calculate distribution of to_stat and from_stat
+    let mut to_distribution = HashMap::<usize, usize>::new();
+    let mut from_distribution = HashMap::<usize, usize>::new();
+    for (_, count) in &to_stat {
+        *to_distribution.entry(*count).or_insert(0) += 1;
+    }
+    for (_, count) in &from_stat {
+        *from_distribution.entry(*count).or_insert(0) += 1;
+    }
+
+    let mut to_vec: Vec<_> = to_distribution.iter().collect();
+    to_vec.sort_unstable_by_key(|(count, _)| *count);
+    println!("\nTo distribution (to_count -> num_addresses):");
+    for (count, num_addresses) in to_vec {
+        if (*count) > 0 {
+            println!("  {} to: {} addresses", count, num_addresses);
+        }
+    }
+
+    let mut from_vec: Vec<_> = from_distribution.iter().collect();
+    from_vec.sort_unstable_by_key(|(count, _)| *count);
+    println!("\nFrom distribution (from_count -> num_addresses):");
+    for (count, num_addresses) in from_vec {
+        if (*count) > 0 {
+            println!("  {} from: {} addresses", count, num_addresses);
+        }
+    }
+
+    // Calculate statistics for to and from for contract calls
+    let mut to_stat_contract = HashMap::<Address, usize>::new();
+    let mut from_stat_contract = HashMap::<Address, usize>::new();
+    for tx in answer.iter().flatten() {
+        if tx.0.type_ == TransactionType::ContractCall {
+            if let Some(to) = tx.0.to {
+                *to_stat_contract.entry(to).or_insert(0) += 1;
+            } else {
+                println!("Contract call transaction with no 'to' address: {:?}", tx.0);
+            }
+            *from_stat_contract.entry(tx.0.from).or_insert(0) += 1;
+        }
+    }
+    // calculate distribution of to_stat_contract and from_stat_contract
+    let mut to_distribution_contract = HashMap::<usize, usize>::new();
+    let mut from_distribution_contract = HashMap::<usize, usize>::new();
+    for (_, count) in &to_stat_contract {
+        *to_distribution_contract.entry(*count).or_insert(0) += 1;
+    }
+    for (_, count) in &from_stat_contract {
+        *from_distribution_contract.entry(*count).or_insert(0) += 1;
+    }
+
+    let mut to_vec_contract: Vec<_> = to_distribution_contract.iter().collect();
+    to_vec_contract.sort_unstable_by_key(|(count, _)| *count);
+    println!("\nTo_contract distribution (to_count -> num_addresses):");
+    for (count, num_addresses) in to_vec_contract {
+        if (*count) > 0 {
+            println!("  {} to: {} addresses", count, num_addresses);
+        }
+    }
+
+    println!("\nTop 10 contract call addresses by count:");
+    let mut to_vec_contract: Vec<_> = to_stat_contract.iter().collect();
+    to_vec_contract.sort_unstable_by_key(|(_, count)| *count);
+    for (address, count) in to_vec_contract.iter().rev().take(10) {
+        println!("  {:x}: {} calls", address, count);
+    }
+
+    let mut from_vec_contract: Vec<_> = from_distribution_contract.iter().collect();
+    from_vec_contract.sort_unstable_by_key(|(count, _)| *count);
+    println!("\nFrom_contract distribution (from_count -> num_addresses):");
+    for (count, num_addresses) in from_vec_contract {
+        if (*count) > 0 {
+            println!("  {} from: {} addresses", count, num_addresses);
+        }
+    }
+
+    // calculate number of db accesses per contract call transaction
+    let mut contract_call_accesses: HashMap::<H160, usize> = HashMap::new();
+    for tx in answer.iter().flatten() {
+        if tx.0.type_ == TransactionType::ContractCall {
+            *contract_call_accesses.entry(tx.0.to.unwrap_or_default()).or_insert(0) += tx.1.len();
+        }
+    }
+
+    // Calculate distribution of db accesses per contract call transaction
+    let mut contract_call_accesses_distribution = HashMap::<usize, usize>::new();
+    for count in &contract_call_accesses {
+        *contract_call_accesses_distribution.entry(*count.1).or_insert(0) += 1;
+    }
+    let mut contract_call_accesses_vec: Vec<_> = contract_call_accesses_distribution.iter().collect();
+    contract_call_accesses_vec.sort_unstable_by_key(|(count, _)| *count);
+    println!("\nAccesses_per_contract distribution (access_count -> num_contracts):");
+    for (count, num_contracts) in contract_call_accesses_vec {
+        if (*count) > 0 {
+            println!("  {} accesses: {} contracts", count, num_contracts);
+        }
     }
 }
 
