@@ -21,6 +21,15 @@ pub struct FetchOptions {
 
     #[structopt(long, default_value = "50")]
     pub batch_size: usize,
+
+    #[structopt(long, default_value = "data")]
+    pub trace_path: String,
+
+    #[structopt(long)]
+    pub dump_raw_data: bool,
+
+    #[structopt(long, default_value = "data")]
+    pub raw_data_path: String,
 }
 
 #[derive(Debug, StructOpt)]

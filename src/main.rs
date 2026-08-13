@@ -78,6 +78,23 @@ pub enum ExperimentTask {
 async fn fetch_main(opts: &FetchOptions) {
     let number = opts.start_block;
     let batch_size = opts.batch_size;
+    let trace_path = opts.trace_path.clone();
+    let raw_data_path = opts.raw_data_path.clone();
+    let dump_raw_data = opts.dump_raw_data;
+    
+    if !Path::new(&trace_path).exists() {
+        fs::create_dir_all(&trace_path).expect("Failed to create trace_path directory");
+    }
+    let trace_path = if trace_path.ends_with('/') {
+        trace_path
+    } else {
+        format!("{}/", trace_path)
+    };
+    let raw_data_path = if raw_data_path.ends_with('/') {
+        raw_data_path
+    } else {
+        format!("{}/", raw_data_path)
+    };
 
     let provider = Provider::<Http>::try_from(opts.node_url.clone())
         .expect("could not instantiate HTTP Provider");
@@ -89,7 +106,9 @@ async fn fetch_main(opts: &FetchOptions) {
     for x in 0..batch_size {
         let provider = provider.clone();
         let number = number + x;
-        set.spawn(async move { (parse_block_trace(provider, number).await, x) });
+        println!("Spawning task for block number: {}", number);
+        let raw_data_path = raw_data_path.clone();
+        set.spawn(async move { (parse_block_trace(provider, raw_data_path, dump_raw_data, number).await, x) });
     }
 
     let mut accesses_cnt: usize = 0;
@@ -99,7 +118,7 @@ async fn fetch_main(opts: &FetchOptions) {
         answers[x] = accesses;
     }
 
-    write_to_file(&answers, format!("data/{}_{}.trace", number, batch_size));
+    write_to_file(&answers, format!("{}{}_{}.trace", trace_path, number, batch_size));
     let elapsed = start.elapsed();
 
     println!(

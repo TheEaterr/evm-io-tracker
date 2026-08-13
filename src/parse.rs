@@ -17,18 +17,20 @@ use ethers::{
     },
 };
 
-pub async fn parse_block_trace(provider: Provider<Http>, number: usize) -> BlockAccess {
+pub async fn parse_block_trace(provider: Provider<Http>, raw_data_path: String, dump_raw_data: bool, number: usize) -> BlockAccess {
     let mut block_accesses = Vec::new();
 
     // Check if the block trace is already saved to file
-    let block_trace_path = format!("/mnt/tank/raw_ethereum_data/blocktrace_{}.json", number);
-    let receipts_path = format!("/mnt/tank/raw_ethereum_data/receipts_{}.json", number);
+    let block_trace_path = format!("{}blocktrace_{}.json", raw_data_path, number);
+    let receipts_path = format!("{}receipts_{}.json", raw_data_path, number);
+    let block_data_path = format!("{}block_{}.json", raw_data_path, number);
 
     let answer: Vec<BlockTrace> = if std::path::Path::new(&block_trace_path).exists() {
         let an = std::fs::read_to_string(&block_trace_path).unwrap();
-        // println!("Block trace loaded from file: {}", block_trace_path);
+        println!("Block trace loaded from file: {}", block_trace_path);
         serde_json::from_str(&an).unwrap()
     } else {
+        println!("Fetching block trace for block number: {}", number);
         provider
         .trace_replay_block_transactions(
             BlockNumber::Number(number.into()),
@@ -40,30 +42,46 @@ pub async fn parse_block_trace(provider: Provider<Http>, number: usize) -> Block
 
     let receipts: Vec<TransactionReceipt> = if std::path::Path::new(&receipts_path).exists() {
         let receipts = std::fs::read_to_string(&receipts_path).unwrap();
-        // println!("Receipts loaded from file: {}", receipts_path);
+        println!("Receipts loaded from file: {}", receipts_path);
         serde_json::from_str(&receipts).unwrap()
     } else {
+        println!("Fetching receipts for block number: {}", number);
         provider
         .get_block_receipts(BlockNumber::Number(number.into()))
         .await
         .unwrap()
     };
 
-    let block: Block<Transaction> = provider
-        .get_block_with_txs(BlockNumber::Number(number.into()))
-        .await
-        .unwrap()
-        .unwrap();
+    let block: Block<Transaction> = if std::path::Path::new(&block_data_path).exists() {
+        let block_data = std::fs::read_to_string(&block_data_path).unwrap();
+        println!("Block data loaded from file: {}", block_data_path);
+        serde_json::from_str(&block_data).unwrap()
+    } else {
+        println!("Fetching block data for block number: {}", number);
+        provider
+            .get_block_with_txs(BlockNumber::Number(number.into()))
+            .await
+            .unwrap()
+            .unwrap()
+    };
 
     assert_eq!(answer.len(), receipts.len());
-    // Save blocktrace and receipts to file for debugging
-    std::fs::write(format!("/mnt/tank/raw_ethereum_data/blocktrace_{}.json", number), serde_json::to_string(&answer).unwrap())
+    if dump_raw_data {
+        // Save blocktrace and receipts to file for debugging
+        std::fs::write(format!("{}blocktrace_{}.json", raw_data_path, number), serde_json::to_string(&answer).unwrap())
+            .unwrap();
+        std::fs::write(
+            format!("{}receipts_{}.json", raw_data_path, number),
+            serde_json::to_string(&receipts).unwrap(),
+        )
         .unwrap();
-    std::fs::write(
-        format!("/mnt/tank/raw_ethereum_data/receipts_{}.json", number),
-        serde_json::to_string(&receipts).unwrap(),
-    )
-    .unwrap();
+        std::fs::write(
+            format!("{}block_{}.json", raw_data_path, number),
+            serde_json::to_string(&block).unwrap(),
+        )
+        .unwrap();
+    }
+    println!("Processing block number: {}", number);
     for (block_trace, receipt) in answer.into_iter().zip(receipts.into_iter()) {
         let contract = match (receipt.to, receipt.contract_address) {
             (Some(x), None) => x,
@@ -75,9 +93,8 @@ pub async fn parse_block_trace(provider: Provider<Http>, number: usize) -> Block
         };
         if let Some(trace) = &block_trace.vm_trace {
             let mut transaction_access = Vec::new();
-            // println!("======= Parsing trace for transaction: {:?}", receipt.transaction_hash);
             let mut transient_storage = HashMap::<(Address, U256), U256>::new();
-            parse_trace(trace, contract, &mut transaction_access, &mut transient_storage, &block, receipt.transaction_index,receipt.transaction_hash == "0xb1470f0a8c75e88d406c3cb798e7f8430c17d1ac85d85275f63176a1d44481a0".parse().unwrap());
+            parse_trace(trace, contract, &mut transaction_access, &mut transient_storage, &block, receipt.transaction_index, false);
             let transaction_type: crate::TransactionType = if receipt.contract_address.is_some() {
                 super::TransactionType::ContractCreation
             } else if block_trace.trace.is_some() && block_trace.trace.as_ref().unwrap().len() == 1 {
@@ -114,6 +131,8 @@ fn parse_trace(
     use Opcode::*;
     let mut stack: Vec<U256> = vec![];
 
+    let checkpoint = transient_storage.clone();
+
     for op in trace.ops.iter().filter(|op| op.ex.is_some()) {
         let opcode = match &op.op {
             ExecutedInstruction::Known(o) => o.clone(),
@@ -122,10 +141,10 @@ fn parse_trace(
                 INVALID
             }
         };
-        // if print_trace {
-        //     println!("stack {:?}", &stack);
-        //     println!("op {:?}", op);
-        // }
+        if print_trace {
+            println!("stack {:?}", &stack);
+            println!("op {:?}", op);
+        }
         integrity_check(op, &stack, block.number.clone().unwrap_or_default().as_usize());
 
         let peek = |x: usize| &stack[stack.len() - x];
@@ -177,9 +196,6 @@ fn parse_trace(
             let slot = peek(1).clone();
             let value = peek(2).clone();
             transient_storage.insert((contract, slot), value);
-            if print_trace {
-                println!("TSTORE: slot: {:?}, value: {:?}", slot, value);
-            }
         }
 
         if matches!(&op.op, ExecutedInstruction::Known(TLOAD)) {
@@ -187,9 +203,6 @@ fn parse_trace(
             let value = transient_storage.get(&(contract, slot)).cloned().unwrap_or_default();
             stack.truncate(stack.len() - pop_num(&opcode));
             stack.push(value);
-            if print_trace {
-                println!("TLOAD: slot: {:?}, value: {:?}", slot, value);
-            }
         } else if matches!(&op.op, ExecutedInstruction::Known(CLZ)) {
             let value = peek(1).clone();
             let leading_zeros = value.leading_zeros();
@@ -209,17 +222,11 @@ fn parse_trace(
             let mut bytes = [0u8; 32];
             bytes.copy_from_slice(h256.as_bytes());
             let result = U256::from_big_endian(&bytes);
-            if print_trace {
-                println!("BLOBHASH: blob_index: {:?}, h256: {:?}, result: {:?}", blob_index, h256, result);
-            }
             stack.truncate(stack.len() - pop_num(&opcode));
             stack.push(result);
         } else if matches!(&op.op, ExecutedInstruction::Known(BLOBBASEFEE)) {
             let excess_blob_gas = block.excess_blob_gas.unwrap_or_default();
             let base_fee_per_blob_gas = get_base_fee_per_blob_gas(excess_blob_gas);
-            if print_trace {
-                println!("BLOBBASEFEE: excess_blob_gas: {:?}, base_fee_per_blob_gas: {:?}", excess_blob_gas, base_fee_per_blob_gas);
-            }
             stack.truncate(stack.len() - pop_num(&opcode));
             stack.push(base_fee_per_blob_gas);
         } else {
@@ -241,6 +248,10 @@ fn parse_trace(
             stack.push(U256::zero());
         }
         // println!("{:?}\n", stack);
+
+        if matches!(&op.op, ExecutedInstruction::Known(REVERT)) {
+            *transient_storage = checkpoint.clone();
+        }
     }
 }
 

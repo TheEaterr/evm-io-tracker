@@ -8,7 +8,6 @@ const BLOB_BASE_FEE_UPDATE_FRACTION: U256 = U256([11684671, 0, 0, 0]);
 /// Computes sum_{i>=0} factor * (numerator/denominator)^i, using integer
 /// arithmetic and stopping when additional terms become zero.
 pub fn fake_exponential(factor: U256, numerator: U256, denominator: U256) -> U256 {
-    println!("Calculating fake_exponential with factor: {:?}, numerator: {:?}, denominator: {:?}", factor, numerator, denominator);
     if denominator == 0.into() {
         return 0.into();
     }
