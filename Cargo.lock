@@ -839,7 +839,7 @@ dependencies = [
 [[package]]
 name = "ethers"
 version = "2.0.14"
-source = "git+https://github.com/TheEaterr/ethers-rs#15fe27fcfa1d476248ec18b555758782cb542815"
+source = "git+https://github.com/TheEaterr/ethers-rs#78ac896b83998c3d011790aabc3e72651cbaa4c2"
 dependencies = [
  "ethers-addressbook",
  "ethers-contract",
@@ -854,7 +854,7 @@ dependencies = [
 [[package]]
 name = "ethers-addressbook"
 version = "2.0.14"
-source = "git+https://github.com/TheEaterr/ethers-rs#15fe27fcfa1d476248ec18b555758782cb542815"
+source = "git+https://github.com/TheEaterr/ethers-rs#78ac896b83998c3d011790aabc3e72651cbaa4c2"
 dependencies = [
  "ethers-core",
  "once_cell",
@@ -865,7 +865,7 @@ dependencies = [
 [[package]]
 name = "ethers-contract"
 version = "2.0.14"
-source = "git+https://github.com/TheEaterr/ethers-rs#15fe27fcfa1d476248ec18b555758782cb542815"
+source = "git+https://github.com/TheEaterr/ethers-rs#78ac896b83998c3d011790aabc3e72651cbaa4c2"
 dependencies = [
  "const-hex",
  "ethers-contract-abigen",
@@ -883,7 +883,7 @@ dependencies = [
 [[package]]
 name = "ethers-contract-abigen"
 version = "2.0.14"
-source = "git+https://github.com/TheEaterr/ethers-rs#15fe27fcfa1d476248ec18b555758782cb542815"
+source = "git+https://github.com/TheEaterr/ethers-rs#78ac896b83998c3d011790aabc3e72651cbaa4c2"
 dependencies = [
  "Inflector",
  "const-hex",
@@ -906,7 +906,7 @@ dependencies = [
 [[package]]
 name = "ethers-contract-derive"
 version = "2.0.14"
-source = "git+https://github.com/TheEaterr/ethers-rs#15fe27fcfa1d476248ec18b555758782cb542815"
+source = "git+https://github.com/TheEaterr/ethers-rs#78ac896b83998c3d011790aabc3e72651cbaa4c2"
 dependencies = [
  "Inflector",
  "const-hex",
@@ -921,7 +921,7 @@ dependencies = [
 [[package]]
 name = "ethers-core"
 version = "2.0.14"
-source = "git+https://github.com/TheEaterr/ethers-rs#15fe27fcfa1d476248ec18b555758782cb542815"
+source = "git+https://github.com/TheEaterr/ethers-rs#78ac896b83998c3d011790aabc3e72651cbaa4c2"
 dependencies = [
  "arrayvec",
  "bytes",
@@ -950,7 +950,7 @@ dependencies = [
 [[package]]
 name = "ethers-etherscan"
 version = "2.0.14"
-source = "git+https://github.com/TheEaterr/ethers-rs#15fe27fcfa1d476248ec18b555758782cb542815"
+source = "git+https://github.com/TheEaterr/ethers-rs#78ac896b83998c3d011790aabc3e72651cbaa4c2"
 dependencies = [
  "chrono",
  "ethers-core",
@@ -965,7 +965,7 @@ dependencies = [
 [[package]]
 name = "ethers-middleware"
 version = "2.0.14"
-source = "git+https://github.com/TheEaterr/ethers-rs#15fe27fcfa1d476248ec18b555758782cb542815"
+source = "git+https://github.com/TheEaterr/ethers-rs#78ac896b83998c3d011790aabc3e72651cbaa4c2"
 dependencies = [
  "async-trait",
  "auto_impl",
@@ -991,7 +991,7 @@ dependencies = [
 [[package]]
 name = "ethers-providers"
 version = "2.0.14"
-source = "git+https://github.com/TheEaterr/ethers-rs#15fe27fcfa1d476248ec18b555758782cb542815"
+source = "git+https://github.com/TheEaterr/ethers-rs#78ac896b83998c3d011790aabc3e72651cbaa4c2"
 dependencies = [
  "async-trait",
  "auto_impl",
@@ -1027,7 +1027,7 @@ dependencies = [
 [[package]]
 name = "ethers-signers"
 version = "2.0.14"
-source = "git+https://github.com/TheEaterr/ethers-rs#15fe27fcfa1d476248ec18b555758782cb542815"
+source = "git+https://github.com/TheEaterr/ethers-rs#78ac896b83998c3d011790aabc3e72651cbaa4c2"
 dependencies = [
  "async-trait",
  "coins-bip32",
@@ -1045,7 +1045,7 @@ dependencies = [
 [[package]]
 name = "ethers-solc"
 version = "2.0.14"
-source = "git+https://github.com/TheEaterr/ethers-rs#15fe27fcfa1d476248ec18b555758782cb542815"
+source = "git+https://github.com/TheEaterr/ethers-rs#78ac896b83998c3d011790aabc3e72651cbaa4c2"
 dependencies = [
  "cfg-if",
  "const-hex",

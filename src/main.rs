@@ -1,5 +1,6 @@
 mod opcode;
 mod parse;
+mod utils;
 
 use opts::{CombineOptions, FetchOptions, SealOptions};
 use parse::parse_block_trace;

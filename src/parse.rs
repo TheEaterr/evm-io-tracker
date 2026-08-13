@@ -1,14 +1,14 @@
 use std::collections::HashMap;
-use std::str::FromStr;
 
 use crate::opcode::integrity_check;
+use crate::utils::{get_base_fee_per_blob_gas};
 use crate::{BlockAccess, TransactionInfo};
 
 use super::DBAccess;
 
 use super::opcode::{pop_num};
 use super::SlotKey;
-use ethers::types::{BlockTrace, TransactionReceipt};
+use ethers::types::{Block, BlockTrace, Transaction, TransactionReceipt, U64};
 use ethers::{
     providers::{Http, Middleware, Provider},
     types::{
@@ -21,12 +21,12 @@ pub async fn parse_block_trace(provider: Provider<Http>, number: usize) -> Block
     let mut block_accesses = Vec::new();
 
     // Check if the block trace is already saved to file
-    let block_trace_path = format!("./data/blocktrace_{}.json", number);
-    let receipts_path = format!("./data/receipts_{}.json", number);
+    let block_trace_path = format!("/mnt/tank/raw_ethereum_data/blocktrace_{}.json", number);
+    let receipts_path = format!("/mnt/tank/raw_ethereum_data/receipts_{}.json", number);
 
     let answer: Vec<BlockTrace> = if std::path::Path::new(&block_trace_path).exists() {
         let an = std::fs::read_to_string(&block_trace_path).unwrap();
-        println!("Block trace loaded from file: {}", block_trace_path);
+        // println!("Block trace loaded from file: {}", block_trace_path);
         serde_json::from_str(&an).unwrap()
     } else {
         provider
@@ -40,7 +40,7 @@ pub async fn parse_block_trace(provider: Provider<Http>, number: usize) -> Block
 
     let receipts: Vec<TransactionReceipt> = if std::path::Path::new(&receipts_path).exists() {
         let receipts = std::fs::read_to_string(&receipts_path).unwrap();
-        println!("Receipts loaded from file: {}", receipts_path);
+        // println!("Receipts loaded from file: {}", receipts_path);
         serde_json::from_str(&receipts).unwrap()
     } else {
         provider
@@ -48,6 +48,12 @@ pub async fn parse_block_trace(provider: Provider<Http>, number: usize) -> Block
         .await
         .unwrap()
     };
+
+    let block: Block<Transaction> = provider
+        .get_block_with_txs(BlockNumber::Number(number.into()))
+        .await
+        .unwrap()
+        .unwrap();
 
     assert_eq!(answer.len(), receipts.len());
     // Save blocktrace and receipts to file for debugging
@@ -69,9 +75,9 @@ pub async fn parse_block_trace(provider: Provider<Http>, number: usize) -> Block
         };
         if let Some(trace) = &block_trace.vm_trace {
             let mut transaction_access = Vec::new();
-            println!("======= Parsing trace for transaction: {:?}", receipt.transaction_hash);
-            let mut transient_storage = HashMap::<U256, U256>::new();
-            parse_trace(trace, contract, &mut transaction_access, &mut transient_storage, number, receipt.transaction_hash == H256::from_str("0x904225d4ff46db25a7a1e7e8609528a6c376ba8fcb873d9e5188cfba510eb709").unwrap());
+            // println!("======= Parsing trace for transaction: {:?}", receipt.transaction_hash);
+            let mut transient_storage = HashMap::<(Address, U256), U256>::new();
+            parse_trace(trace, contract, &mut transaction_access, &mut transient_storage, &block, receipt.transaction_index,receipt.transaction_hash == "0xb1470f0a8c75e88d406c3cb798e7f8430c17d1ac85d85275f63176a1d44481a0".parse().unwrap());
             let transaction_type: crate::TransactionType = if receipt.contract_address.is_some() {
                 super::TransactionType::ContractCreation
             } else if block_trace.trace.is_some() && block_trace.trace.as_ref().unwrap().len() == 1 {
@@ -100,8 +106,9 @@ fn parse_trace(
     trace: &VMTrace,
     contract: Address,
     accesses: &mut Vec<DBAccess>,
-    transient_storage: &mut HashMap<U256, U256>,
-    block_number: usize,
+    transient_storage: &mut HashMap<(Address, U256), U256>,
+    block: &Block<Transaction>,
+    index: U64,
     print_trace: bool,
 ) {
     use Opcode::*;
@@ -115,11 +122,11 @@ fn parse_trace(
                 INVALID
             }
         };
-        if print_trace {
-            println!("stack {:?}", &stack);
-            println!("op {:?}", op);
-        }
-        integrity_check(op, &stack, block_number);
+        // if print_trace {
+        //     println!("stack {:?}", &stack);
+        //     println!("op {:?}", op);
+        // }
+        integrity_check(op, &stack, block.number.clone().unwrap_or_default().as_usize());
 
         let peek = |x: usize| &stack[stack.len() - x];
 
@@ -140,7 +147,7 @@ fn parse_trace(
                 CREATE | CREATE2 => Some(u256_to_address(&single_return())),
                 _ => None,
             } {
-                parse_trace(sub_trace, next_contract, accesses, transient_storage, block_number, print_trace);
+                parse_trace(sub_trace, next_contract, accesses, transient_storage, block, index, print_trace);
             }
         }
 
@@ -169,22 +176,52 @@ fn parse_trace(
         if matches!(&op.op, ExecutedInstruction::Known(TSTORE)) {
             let slot = peek(1).clone();
             let value = peek(2).clone();
-            transient_storage.insert(slot, value);
-            // println!("TSTORE: slot: {:?}, value: {:?}", slot, value);
+            transient_storage.insert((contract, slot), value);
+            if print_trace {
+                println!("TSTORE: slot: {:?}, value: {:?}", slot, value);
+            }
         }
 
         if matches!(&op.op, ExecutedInstruction::Known(TLOAD)) {
             let slot = peek(1).clone();
-            let value = transient_storage.get(&slot).cloned().unwrap_or_default();
+            let value = transient_storage.get(&(contract, slot)).cloned().unwrap_or_default();
             stack.truncate(stack.len() - pop_num(&opcode));
             stack.push(value);
-            // println!("TLOAD: slot: {:?}, value: {:?}", slot, value);
+            if print_trace {
+                println!("TLOAD: slot: {:?}, value: {:?}", slot, value);
+            }
         } else if matches!(&op.op, ExecutedInstruction::Known(CLZ)) {
             let value = peek(1).clone();
             let leading_zeros = value.leading_zeros();
             let result = U256::from(leading_zeros);
             stack.truncate(stack.len() - pop_num(&opcode));
             stack.push(result);
+        } else if matches!(&op.op, ExecutedInstruction::Known(BLOBHASH)) {
+            let blob_index = peek(1).clone();
+            // blob_versioned_hashes is an Option<Vec<H256>>; handle missing data
+            let h256 = block.transactions[index.as_usize()]
+                .blob_versioned_hashes
+                .as_ref()
+                .and_then(|v| v.get(blob_index.as_usize()))
+                .cloned()
+                .unwrap_or_default();
+            // convert H256 to U256
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(h256.as_bytes());
+            let result = U256::from_big_endian(&bytes);
+            if print_trace {
+                println!("BLOBHASH: blob_index: {:?}, h256: {:?}, result: {:?}", blob_index, h256, result);
+            }
+            stack.truncate(stack.len() - pop_num(&opcode));
+            stack.push(result);
+        } else if matches!(&op.op, ExecutedInstruction::Known(BLOBBASEFEE)) {
+            let excess_blob_gas = block.excess_blob_gas.unwrap_or_default();
+            let base_fee_per_blob_gas = get_base_fee_per_blob_gas(excess_blob_gas);
+            if print_trace {
+                println!("BLOBBASEFEE: excess_blob_gas: {:?}, base_fee_per_blob_gas: {:?}", excess_blob_gas, base_fee_per_blob_gas);
+            }
+            stack.truncate(stack.len() - pop_num(&opcode));
+            stack.push(base_fee_per_blob_gas);
         } else {
             stack.truncate(stack.len() - pop_num(&opcode));
         }
