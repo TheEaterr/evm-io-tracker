@@ -4,9 +4,10 @@ mod utils;
 
 use opts::{CombineOptions, FetchOptions, SealOptions};
 use parse::parse_block_trace;
+use utils::{u256_to_hash};
 
 use ethers::{
-    providers::{Http, Provider}, types::{Address, H160, U256}
+    providers::{Http, Middleware, Provider}, types::{Address, BlockId, H160, U256}
 };
 use postcard::{from_bytes, to_stdvec};
 use rand::seq::SliceRandom;
@@ -23,7 +24,7 @@ use structopt::StructOpt;
 use tiny_keccak::{Hasher, Keccak};
 use tokio::{task::JoinSet, time::Instant};
 
-use crate::opts::Options;
+use crate::{opts::Options};
 mod opts;
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
@@ -218,9 +219,11 @@ fn u256_to_bytes(number: &U256) -> Vec<u8> {
     encoded.to_vec()
 }
 
-fn seal(opts: &SealOptions) {
+async fn seal(opts: &SealOptions) {
     let loaded = std::fs::read(&opts.input).unwrap();
     let answer: Vec<BlockAccess> = from_bytes(&loaded).unwrap();
+    let provider = Provider::<Http>::try_from(opts.node_url.clone()).unwrap();
+    let block_id: BlockId = BlockId::Number(25691350.into());
 
     let mut frontier = HashMap::<SlotKey, U256>::new();
     let mut touched = HashSet::<SlotKey>::new();
@@ -242,12 +245,21 @@ fn seal(opts: &SealOptions) {
                 }
                 DBAccess::Write(slot, _) => {
                     touched.insert(slot.clone());
-                    if written_slots.contains(&slot) {
+                    if frontier.contains_key(&slot) || written_slots.contains(&slot) {
                         access_stat.entry(slot.clone()).or_default().2 += 1; // update
                     } else {
-                        written_slots.insert(slot.clone());
-                        access_stat.entry(slot.clone()).or_default().1 += 1; // write
-                        access_stat.entry(slot.clone()).or_default().2 += 1; // update
+                        // query the value from the database and add it to the frontier
+                        let result = provider
+                            .get_storage_at(slot.address, u256_to_hash(&slot.slot), Some(block_id))
+                            .await
+                            .unwrap();
+                        if result != ethers::types::H256::zero() {
+                            frontier.insert(slot.clone(), U256::from_big_endian(result.as_bytes()));
+                            access_stat.entry(slot.clone()).or_default().2 += 1; // update
+                        } else {
+                            access_stat.entry(slot.clone()).or_default().1 += 1; // write
+                            written_slots.insert(slot.clone());
+                        }
                     }
                 }
             }
@@ -261,15 +273,22 @@ fn seal(opts: &SealOptions) {
                 address: addr,
                 slot: U256::zero(),
             };
-            if !touched.contains(&slot) {
-                written_slots.insert(slot.clone());
-                touched.insert(slot.clone());
-                access_stat.entry(slot.clone()).or_default().0 += 1;
-                access_stat.entry(slot.clone()).or_default().1 += 1;
-                frontier.insert(slot.clone(), U256::zero());
-            } else {
-                access_stat.entry(slot.clone()).or_default().0 += 1;
+            access_stat.entry(slot.clone()).or_default().0 += 1;
+            touched.insert(slot.clone());
+            if frontier.contains_key(&slot) || written_slots.contains(&slot) {
                 access_stat.entry(slot.clone()).or_default().2 += 1; // update
+            } else {
+                let result = provider
+                    .get_balance(addr, Some(block_id))
+                    .await
+                    .unwrap();
+                if result != U256::zero() {
+                    frontier.insert(slot.clone(), result);
+                    access_stat.entry(slot.clone()).or_default().2 += 1; // update
+                } else {
+                    written_slots.insert(slot.clone());
+                    access_stat.entry(slot.clone()).or_default().1 += 1;
+                }
             }
         }
         
@@ -290,9 +309,9 @@ fn seal(opts: &SealOptions) {
     let mut read_distribution = HashMap::<usize, usize>::new();
     let mut write_distribution = HashMap::<usize, usize>::new();
     let mut update_distribution = HashMap::<usize, usize>::new();
-    for (_, (reads, _writes, updates)) in &access_stat {
+    for (_, (reads, writes, updates)) in &access_stat {
         *read_distribution.entry(*reads).or_insert(0) += 1;
-        *write_distribution.entry(*_writes).or_insert(0) += 1;
+        *write_distribution.entry(*writes).or_insert(0) += 1;
         *update_distribution.entry(*updates).or_insert(0) += 1;
     }
 
@@ -462,7 +481,7 @@ async fn main() {
             combine(&opts);
         }
         Options::Seal(opts) => {
-            seal(&opts);
+            seal(&opts).await;
         }
     }
 }

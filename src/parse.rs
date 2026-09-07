@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::opcode::integrity_check;
-use crate::utils::{get_base_fee_per_blob_gas};
+use crate::utils::{get_base_fee_per_blob_gas, u256_to_address};
 use crate::{BlockAccess, TransactionInfo};
 
 use super::DBAccess;
@@ -12,8 +12,8 @@ use ethers::types::{Block, BlockTrace, Transaction, TransactionReceipt, U64};
 use ethers::{
     providers::{Http, Middleware, Provider},
     types::{
-        Address, BigEndianHash, BlockNumber, ExecutedInstruction, Opcode, TraceType,
-        TransactionTrace, Action, VMTrace, H256, U256,
+        Address, BlockNumber, ExecutedInstruction, Opcode, TraceType,
+        TransactionTrace, Action, VMTrace, U256,
     },
 };
 
@@ -253,10 +253,4 @@ fn parse_trace(
             *transient_storage = checkpoint.clone();
         }
     }
-}
-
-#[inline]
-fn u256_to_address(value: &U256) -> Address {
-    let addr: H256 = BigEndianHash::from_uint(value);
-    Address::from(addr)
 }

@@ -48,6 +48,9 @@ pub struct CombineOptions {
 #[derive(Debug, StructOpt)]
 #[structopt(rename_all = "kebab-case")]
 pub struct SealOptions {
+    #[structopt(long, default_value = "http://127.0.0.1:8545/")]
+    pub node_url: String,
+
     #[structopt(long)]
     pub input: String,
 

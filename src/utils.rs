@@ -1,4 +1,4 @@
-use ethers::types::U256;
+use ethers::types::{Address, BigEndianHash, H256, U256};
 
 const MIN_BASE_FEE_PER_BLOB_GAS: U256 = U256([1, 0, 0, 0]);
 const BLOB_BASE_FEE_UPDATE_FRACTION: U256 = U256([11684671, 0, 0, 0]);
@@ -42,4 +42,15 @@ pub fn get_base_fee_per_blob_gas(excess_blob_gas: U256) -> U256 {
         excess_blob_gas,
         BLOB_BASE_FEE_UPDATE_FRACTION
     )
+}
+
+#[inline]
+pub fn u256_to_address(value: &U256) -> Address {
+    let addr: H256 = BigEndianHash::from_uint(value);
+    Address::from(addr)
+}
+
+#[inline]
+pub fn u256_to_hash(value: &U256) -> H256 {
+    BigEndianHash::from_uint(value)
 }
