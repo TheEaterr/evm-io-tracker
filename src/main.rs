@@ -1,10 +1,12 @@
 mod opcode;
 mod parse;
 mod utils;
+mod sort_accounts;
 
 use opts::{CombineOptions, FetchOptions, SealOptions};
+use ordermap::OrderSet;
 use parse::parse_block_trace;
-use utils::{u256_to_hash};
+use utils::{u256_to_hash, write_data};
 
 use ethers::{
     providers::{Http, Middleware, Provider}, types::{Address, BlockId, H160, U256}
@@ -13,6 +15,7 @@ use postcard::{from_bytes, to_stdvec};
 use rand::seq::SliceRandom;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use core::num;
 use std::fs;
 use std::fs::File;
 use std::{
@@ -24,7 +27,7 @@ use structopt::StructOpt;
 use tiny_keccak::{Hasher, Keccak};
 use tokio::{task::JoinSet, time::Instant};
 
-use crate::{opts::Options};
+use crate::{opts::{Options, SortAccountsOptions}, sort_accounts::get_addresses_in_block};
 mod opts;
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
@@ -134,6 +137,71 @@ async fn fetch_main(opts: &FetchOptions) {
     // sleep(std::cmp::min(elapsed / 3, Duration::from_secs(10))).await;
 }
 
+async fn sort_accounts_main(opts: &SortAccountsOptions) {
+    let number = opts.start_block;
+    let end_block = opts.end_block;
+    let batch_size = opts.batch_size;
+    let sorted_accounts_path = opts.sorted_accounts_path.clone();
+    
+    if !Path::new(&sorted_accounts_path).exists() {
+        fs::create_dir_all(&sorted_accounts_path).expect("Failed to create sorted_accounts_path directory");
+    }
+    let sorted_accounts_path = if sorted_accounts_path.ends_with('/') {
+        sorted_accounts_path
+    } else {
+        format!("{}/", sorted_accounts_path)
+    };
+
+    let provider = Provider::<Http>::try_from(opts.node_url.clone())
+        .expect("could not instantiate HTTP Provider");
+
+    let mut set = JoinSet::new();
+
+    let start = Instant::now();
+    let mut new_addresses: OrderSet<H160> = OrderSet::new();
+    let mut results_by_index: Vec<Option<OrderSet<H160>>> = vec![None; batch_size];
+    let number_of_batches = (end_block - number + batch_size - 1) / batch_size;
+
+    for batch in 0..number_of_batches {
+        let batch_start = number + batch * batch_size;
+        let batch_end = std::cmp::min(batch_start + batch_size, end_block);
+        let current_batch_size = batch_end - batch_start;
+
+        for x in 0..current_batch_size {
+            let provider = provider.clone();
+            let block_number = batch_start + x;
+            set.spawn(async move { (get_addresses_in_block(provider, block_number).await, x) });
+        }
+
+        while let Some(results) = set.join_next().await {
+            let (block_new_addresses, x) = results.unwrap();
+            results_by_index[x] = Some(block_new_addresses);
+        }
+
+        // Now extend in loop order
+        for block_new_addresses in results_by_index.iter_mut().take(current_batch_size).flatten() {
+            new_addresses.extend(block_new_addresses.drain(..));
+        }
+
+        // OrderSet<H160> doesn't implement serde::Serialize, convert to Vec<H160> first
+        let new_addresses_vec: Vec<H160> = new_addresses.iter().cloned().collect();
+        write_to_file(&new_addresses_vec, format!("{}{}_{}.accounts", sorted_accounts_path, batch_start, current_batch_size));
+        let elapsed = start.elapsed();
+
+        println!(
+            "Block number {} to {}: {} items ({:?})",
+            batch_start,
+            batch_end - 1,
+            new_addresses_vec.len(),
+            elapsed
+        );
+    }
+
+    std::mem::drop(provider);
+    // sleep(std::cmp::min(elapsed / 3, Duration::from_secs(10))).await;
+}
+
+
 fn combine(opts: &CombineOptions) {
     let re = Regex::new(r"^(\d+)_(\d+)\.trace$").unwrap();
     let mut pathes: Vec<_> = fs::read_dir(&opts.path)
@@ -230,6 +298,15 @@ async fn seal(opts: &SealOptions) {
     let mut access_stat = HashMap::<SlotKey, (usize, usize, usize)>::new(); // (reads, writes, updates)
     let mut written_slots = HashSet::<SlotKey>::new();
 
+    println!("Sealing {} blocks", answer.len());
+    let number_of_txs: usize = answer.iter().map(|x| x.len()).sum();
+    println!(
+        "Total number of transactions: {}, average {} txs per block",
+        number_of_txs,
+        number_of_txs as f64 / answer.len() as f64
+    );
+    let mut i = 0;
+
     for tx in answer.iter().flatten() {
         for x in &tx.1 {
             match x {
@@ -291,7 +368,10 @@ async fn seal(opts: &SealOptions) {
                 }
             }
         }
-        
+        if i % 1000 == 0 {
+            println!("Processed {} transactions", i);
+        }
+        i += 1;
     }
 
     println!(
@@ -468,12 +548,47 @@ async fn seal(opts: &SealOptions) {
             println!("  {} accesses: {} contracts", count, num_contracts);
         }
     }
+
+    let mut regular_init_set: HashSet<H160> = answer
+        .iter()
+        .flatten()
+        .filter(|tx| tx.0.type_ == TransactionType::Regular)
+        .flat_map(|tx| {
+            tx.0.to.into_iter().chain(std::iter::once(tx.0.from))
+        })
+        .collect();
+    let mut regular_init_vec: Vec<H160> = regular_init_set.drain().collect();
+    regular_init_vec.shuffle(&mut rand::rng());
+    println!("Regular init set size: {}", regular_init_vec.len());
+    write_data(
+        &format!("{}/regular_init_set.bin", opts.output),
+        &regular_init_vec,
+    )
+    .unwrap();
+
+    let regular_trace: Vec<H160> = answer
+        .iter()
+        .flatten()
+        .filter(|tx| tx.0.type_ == TransactionType::Regular)
+        .flat_map(|tx| {
+            tx.0.to.into_iter().chain(std::iter::once(tx.0.from))
+        })
+        .collect();
+    println!("Regular trace size: {}", regular_trace.len());
+    write_data(
+        &format!("{}/regular_trace.bin", opts.output),
+        &regular_trace,
+    )
+    .unwrap();
 }
 
 #[tokio::main]
 async fn main() {
     let options: Options = Options::from_args();
     match options {
+        Options::SortAccounts(opts) => {
+            sort_accounts_main(&opts).await;
+        }
         Options::Fetch(opts) => {
             fetch_main(&opts).await;
         }
