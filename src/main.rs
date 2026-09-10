@@ -15,7 +15,6 @@ use postcard::{from_bytes, to_stdvec};
 use rand::seq::SliceRandom;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use core::num;
 use std::fs;
 use std::fs::File;
 use std::{
@@ -138,7 +137,7 @@ async fn fetch_main(opts: &FetchOptions) {
 }
 
 async fn sort_accounts_main(opts: &SortAccountsOptions) {
-    let number = opts.start_block;
+    let mut number = opts.start_block;
     let end_block = opts.end_block;
     let batch_size = opts.batch_size;
     let sorted_accounts_path = opts.sorted_accounts_path.clone();
@@ -153,15 +152,54 @@ async fn sort_accounts_main(opts: &SortAccountsOptions) {
     };
 
     let provider = Provider::<Http>::try_from(opts.node_url.clone())
-        .expect("could not instantiate HTTP Provider");
+    .expect("could not instantiate HTTP Provider");
 
     let mut set = JoinSet::new();
 
     let start = Instant::now();
     let mut new_addresses: OrderSet<H160> = OrderSet::new();
     let mut results_by_index: Vec<Option<OrderSet<H160>>> = vec![None; batch_size];
+    
+    // list all files in directory ending with .accounts and check if the last file has the correct number of accounts
+    let mut last_file_number = 0;
+    let mut last_file_accounts = 0;
+    let mut last_file_path = String::new();
+    for entry in fs::read_dir(&sorted_accounts_path).expect("Failed to read sorted_accounts_path directory") {
+        let entry = entry.expect("Failed to read entry in sorted_accounts_path directory");
+        let path = entry.path();
+        if path.is_file() && path.extension().map_or(false, |ext| ext == "accounts") {
+            let file_name = path.file_name().expect("Failed to get file name").to_string_lossy();
+            let parts: Vec<&str> = file_name.split('_').collect();
+            if parts.len() == 2 {
+                if let Ok(file_number) = parts[0].parse::<usize>() {
+                    if let Ok(file_accounts) = parts[1].split('.').next().unwrap_or("").parse::<usize>() {
+                        if file_number > last_file_number {
+                            last_file_number = file_number;
+                            last_file_accounts = file_accounts; 
+                            last_file_path = path.to_string_lossy().to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if last_file_number + last_file_accounts < number {
+        panic!("The last file {} has accounts up to {}, but the requested start block is {}. Please run the sort_accounts command for the missing blocks.", last_file_path, last_file_number + last_file_accounts - 1, number);
+    }
+    if last_file_number + last_file_accounts > end_block {
+        println!("The last file {} has accounts up to {}, but the requested end block is {}. No need to fetch new accounts.", last_file_path, last_file_number + last_file_accounts - 1, end_block);
+    }
+    if last_file_path.is_empty() && number == 0 {
+        println!("Starting fresh sorting of accounts from genesis block.");
+    } else {
+        number = last_file_number + last_file_accounts;
+        println!("Sorting accounts starting from block number: {}, using data from {}", number, last_file_path);
+        // read the last file and add the accounts to new_addresses
+        let last_file_accounts: Vec<H160> = read_from_file(last_file_path);
+        new_addresses.extend(last_file_accounts);
+    }
+    
     let number_of_batches = (end_block - number + batch_size - 1) / batch_size;
-
     for batch in 0..number_of_batches {
         let batch_start = number + batch * batch_size;
         let batch_end = std::cmp::min(batch_start + batch_size, end_block);
@@ -186,6 +224,16 @@ async fn sort_accounts_main(opts: &SortAccountsOptions) {
         // OrderSet<H160> doesn't implement serde::Serialize, convert to Vec<H160> first
         let new_addresses_vec: Vec<H160> = new_addresses.iter().cloned().collect();
         write_to_file(&new_addresses_vec, format!("{}{}_{}.accounts", sorted_accounts_path, batch_start, current_batch_size));
+        // Delete the previous batch file if it exists
+        if batch_start != number {
+            let previous_batch_start = batch_start - batch_size;
+            let previous_batch_end = std::cmp::min(previous_batch_start + batch_size, end_block);
+            let previous_batch_size = previous_batch_end - previous_batch_start;
+            let previous_file_path = format!("{}{}_{}.accounts", sorted_accounts_path, previous_batch_start, previous_batch_size);
+            if Path::new(&previous_file_path).exists() {
+                fs::remove_file(&previous_file_path).expect("Failed to delete previous batch file");
+            }
+        }
         let elapsed = start.elapsed();
 
         println!(
