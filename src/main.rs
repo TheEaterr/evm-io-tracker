@@ -186,8 +186,9 @@ async fn sort_accounts_main(opts: &SortAccountsOptions) {
     if last_file_number + last_file_accounts < number {
         panic!("The last file {} has accounts up to {}, but the requested start block is {}. Please run the sort_accounts command for the missing blocks.", last_file_path, last_file_number + last_file_accounts - 1, number);
     }
-    if last_file_number + last_file_accounts > end_block {
+    if last_file_number + last_file_accounts >= end_block {
         println!("The last file {} has accounts up to {}, but the requested end block is {}. No need to fetch new accounts.", last_file_path, last_file_number + last_file_accounts - 1, end_block);
+        return;
     }
     if last_file_path.is_empty() && number == 0 {
         println!("Starting fresh sorting of accounts from genesis block.");
@@ -195,7 +196,8 @@ async fn sort_accounts_main(opts: &SortAccountsOptions) {
         number = last_file_number + last_file_accounts;
         println!("Sorting accounts starting from block number: {}, using data from {}", number, last_file_path);
         // read the last file and add the accounts to new_addresses
-        let last_file_accounts: Vec<H160> = read_from_file(last_file_path);
+        let last_file_accounts_path = last_file_path.clone();
+        let last_file_accounts: Vec<H160> = read_from_file(last_file_accounts_path);
         new_addresses.extend(last_file_accounts);
         println!("Loaded {} accounts from the last file.", new_addresses.len());
     }
@@ -222,28 +224,24 @@ async fn sort_accounts_main(opts: &SortAccountsOptions) {
             new_addresses.extend(block_new_addresses.drain(..));
         }
 
-        // OrderSet<H160> doesn't implement serde::Serialize, convert to Vec<H160> first
-        let new_addresses_vec: Vec<H160> = new_addresses.iter().cloned().collect();
-        write_to_file(&new_addresses_vec, format!("{}{}_{}.accounts", sorted_accounts_path, batch_start, current_batch_size));
-        // Delete the previous batch file if it exists
-        if batch_start != number {
-            let previous_batch_start = batch_start - batch_size;
-            let previous_batch_end = std::cmp::min(previous_batch_start + batch_size, end_block);
-            let previous_batch_size = previous_batch_end - previous_batch_start;
-            let previous_file_path = format!("{}{}_{}.accounts", sorted_accounts_path, previous_batch_start, previous_batch_size);
-            if Path::new(&previous_file_path).exists() {
-                fs::remove_file(&previous_file_path).expect("Failed to delete previous batch file");
-            }
-        }
         let elapsed = start.elapsed();
-
+        
         println!(
             "Block number {} to {}: {} items ({:?})",
             batch_start,
             batch_end - 1,
-            new_addresses_vec.len(),
+            new_addresses.len(),
             elapsed
         );
+    }
+    // OrderSet<H160> doesn't implement serde::Serialize, convert to Vec<H160> first
+    let new_addresses_vec: Vec<H160> = new_addresses.iter().cloned().collect();
+    write_to_file(&new_addresses_vec, format!("{}{}_{}.accounts", sorted_accounts_path, number, end_block - number));
+
+    // Remove previous file that was used to start the sorting, if it exists
+    if Path::new(&last_file_path).exists() {
+        fs::remove_file(&last_file_path).expect("Failed to remove previous accounts file");
+        println!("Removed previous accounts file: {}", last_file_path);
     }
 
     std::mem::drop(provider);
