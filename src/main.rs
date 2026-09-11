@@ -197,6 +197,7 @@ async fn sort_accounts_main(opts: &SortAccountsOptions) {
         // read the last file and add the accounts to new_addresses
         let last_file_accounts: Vec<H160> = read_from_file(last_file_path);
         new_addresses.extend(last_file_accounts);
+        println!("Loaded {} accounts from the last file.", new_addresses.len());
     }
     
     let number_of_batches = (end_block - number + batch_size - 1) / batch_size;
