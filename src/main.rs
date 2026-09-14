@@ -6,7 +6,7 @@ mod sort_accounts;
 use opts::{CombineOptions, FetchOptions, SealOptions};
 use ordermap::OrderSet;
 use parse::parse_block_trace;
-use utils::{u256_to_hash, write_data};
+use utils::{u256_to_hash};
 
 use ethers::{
     providers::{Http, Middleware, Provider}, types::{Address, BlockId, H160, U256}
@@ -15,7 +15,7 @@ use postcard::{from_bytes, to_stdvec};
 use rand::seq::SliceRandom;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::{fs, io::{self, BufWriter}};
 use std::fs::File;
 use std::{
     collections::{HashMap, HashSet},
@@ -25,6 +25,7 @@ use std::{io::Write, path::Path};
 use structopt::StructOpt;
 use tiny_keccak::{Hasher, Keccak};
 use tokio::{task::JoinSet, time::Instant};
+use bytemuck::{Pod, Zeroable};
 
 use crate::{opts::{Options, SortAccountsOptions}, sort_accounts::get_addresses_in_block};
 mod opts;
@@ -68,6 +69,24 @@ pub struct TransactionInfo {
     pub from: Address,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct C_Operation {
+    address: u64,
+    key: u64,
+    is_read: u64,
+    value: [u8; 32],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct C_Transaction {
+    key_from: u64,
+    key_to: u64,
+    is_regular: u64,
+    n_ops: u64,
+}
+
 pub type TransactionAccess = (TransactionInfo, Vec<DBAccess>);
 
 pub type BlockAccess = Vec<TransactionAccess>;
@@ -77,6 +96,8 @@ pub enum ExperimentTask {
     Read([u8; 32]),
     Write([u8; 32], Vec<u8>),
 }
+
+const MAGIC: &[u8; 4] = b"DATA";
 
 async fn fetch_main(opts: &FetchOptions) {
     let number = opts.start_block;
@@ -332,6 +353,31 @@ fn u256_to_bytes(number: &U256) -> Vec<u8> {
     let mut encoded = [0u8; 32];
     number.to_big_endian(&mut encoded);
     encoded.to_vec()
+}
+
+fn write_trace(filename: &str, transactions: &[C_Transaction], operations: &[Vec<C_Operation>]) -> io::Result<()> {
+    assert_eq!(transactions.len(), operations.len());
+
+    let file = File::create(filename)?;
+    let mut writer = BufWriter::new(file);
+
+    // Header
+    writer.write_all(MAGIC)?;
+    writer.write_all(&(transactions.len() as u64).to_le_bytes())?;
+
+    for (transaction, ops) in transactions.iter().zip(operations.iter()) {
+        assert_eq!(transaction.n_ops, ops.len() as u64);
+
+        // Write transaction header
+        writer.write_all(bytemuck::bytes_of(transaction))?;
+
+        // Write operations immediately after it
+        writer.write_all(bytemuck::cast_slice(ops))?;
+    }
+
+    writer.flush()?;
+
+    Ok(())
 }
 
 async fn seal(opts: &SealOptions) {
@@ -596,37 +642,24 @@ async fn seal(opts: &SealOptions) {
         }
     }
 
-    let mut regular_init_set: HashSet<H160> = answer
+    // Write the initial task to a file using write_trace
+    let init_task_path = Path::new(&opts.output).join("init_task.bin");
+    let init_task_c: Vec<C_Operation> = init_task
         .iter()
-        .flatten()
-        .filter(|tx| tx.0.type_ == TransactionType::Regular)
-        .flat_map(|tx| {
-            tx.0.to.into_iter().chain(std::iter::once(tx.0.from))
+        .map(|(digest, value)| C_Operation {
+            address: u64::from_le_bytes(digest[0..8].try_into().unwrap()),
+            key: u64::from_le_bytes(digest[8..16].try_into().unwrap()),
+            is_read: 0,
+            value: value.clone().try_into().unwrap(),
         })
         .collect();
-    let mut regular_init_vec: Vec<H160> = regular_init_set.drain().collect();
-    regular_init_vec.shuffle(&mut rand::rng());
-    println!("Regular init set size: {}", regular_init_vec.len());
-    write_data(
-        &format!("{}/regular_init_set.bin", opts.output),
-        &regular_init_vec,
-    )
-    .unwrap();
-
-    let regular_trace: Vec<H160> = answer
-        .iter()
-        .flatten()
-        .filter(|tx| tx.0.type_ == TransactionType::Regular)
-        .flat_map(|tx| {
-            tx.0.to.into_iter().chain(std::iter::once(tx.0.from))
-        })
-        .collect();
-    println!("Regular trace size: {}", regular_trace.len());
-    write_data(
-        &format!("{}/regular_trace.bin", opts.output),
-        &regular_trace,
-    )
-    .unwrap();
+    let init_transaction = C_Transaction {
+        key_from: 0,
+        key_to: 0,
+        is_regular: 0,
+        n_ops: init_task_c.len() as u64,
+    };
+    write_trace(init_task_path.to_str().unwrap(), &[init_transaction], &[init_task_c]).expect("Failed to write init_task.bin");
 }
 
 #[tokio::main]
