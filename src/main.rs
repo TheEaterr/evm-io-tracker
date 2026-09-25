@@ -389,6 +389,12 @@ fn write_trace(filename: &str, transactions: &[C_Transaction], operations: &[Vec
     Ok(())
 }
 
+fn analyze(opts: &AnalyzeOptions) {
+    analyze_trace(opts, true, 0);
+    analyze_trace(opts, false, 1);
+    analyze_trace(opts, false, 2);
+}
+
 async fn seal(opts: &SealOptions) {
     let loaded = std::fs::read(&opts.input).unwrap();
     let answer: Vec<BlockAccess> = from_bytes(&loaded).unwrap();
