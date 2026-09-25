@@ -390,6 +390,7 @@ async fn seal(opts: &SealOptions) {
     let mut touched = HashSet::<SlotKey>::new();
     let mut access_stat = HashMap::<SlotKey, (usize, usize, usize)>::new(); // (reads, writes, updates)
     let mut written_slots = HashSet::<SlotKey>::new();
+    let mut expected_not_found = 0;
 
     println!("Sealing {} blocks", answer.len());
     let number_of_txs: usize = answer.iter().map(|x| x.len()).sum();
@@ -407,63 +408,29 @@ async fn seal(opts: &SealOptions) {
                     touched.insert(slot.clone());
                     if !value.is_zero() {
                         frontier.insert(slot.clone(), value.clone());
+                    } else {
+                        expected_not_found += 1;
                     }
                     access_stat.entry(slot.clone()).or_default().0 += 1;
                 }
                 DBAccess::Read(slot, _) => {
                     access_stat.entry(slot.clone()).or_default().0 += 1;
+                    if !frontier.contains_key(&slot) && !written_slots.contains(&slot) {
+                        expected_not_found += 1;
+                    }
                 }
                 DBAccess::Write(slot, _) => {
                     touched.insert(slot.clone());
                     if frontier.contains_key(&slot) || written_slots.contains(&slot) {
                         access_stat.entry(slot.clone()).or_default().2 += 1; // update
                     } else {
-                        // query the value from the database and add it to the frontier
-                        let result = provider
-                            .get_storage_at(slot.address, u256_to_hash(&slot.slot), Some(block_id))
-                            .await
-                            .unwrap();
-                        if result != ethers::types::H256::zero() {
-                            frontier.insert(slot.clone(), U256::from_big_endian(result.as_bytes()));
-                            access_stat.entry(slot.clone()).or_default().2 += 1; // update
-                        } else {
-                            access_stat.entry(slot.clone()).or_default().1 += 1; // write
-                            written_slots.insert(slot.clone());
-                        }
+                        access_stat.entry(slot.clone()).or_default().1 += 1; // write
+                        written_slots.insert(slot.clone());
                     }
                 }
             }
         }
-        // add the from and to db operations
-        for addr in [tx.0.from, tx.0.to.unwrap_or_default()] {
-            if addr == Address::zero() {
-                continue;
-            }
-            let slot = SlotKey {
-                address: addr,
-                slot: U256::zero(),
-            };
-            access_stat.entry(slot.clone()).or_default().0 += 1;
-            touched.insert(slot.clone());
-            if frontier.contains_key(&slot) || written_slots.contains(&slot) {
-                access_stat.entry(slot.clone()).or_default().2 += 1; // update
-            } else {
-                let result = provider
-                    .get_balance(addr, Some(block_id))
-                    .await
-                    .unwrap();
-                if result != U256::zero() {
-                    frontier.insert(slot.clone(), result);
-                    access_stat.entry(slot.clone()).or_default().2 += 1; // update
-                } else {
-                    written_slots.insert(slot.clone());
-                    access_stat.entry(slot.clone()).or_default().1 += 1;
-                }
-            }
-        }
-        if i % 1000 == 0 {
-            println!("Processed {} transactions", i);
-        }
+        println!("Processed {} transactions", i);
         i += 1;
     }
 
@@ -477,6 +444,7 @@ async fn seal(opts: &SealOptions) {
         answer.iter().flatten().map(|x| x.1.len()).sum::<usize>(),
     );
     println!("Touched set {}, init set {}", touched.len(), frontier.len());
+    println!("Expected not found: {}", expected_not_found);
 
     // Calculate access distribution
     let mut read_distribution = HashMap::<usize, usize>::new();
@@ -507,18 +475,12 @@ async fn seal(opts: &SealOptions) {
         }
     }
 
-    let mut init_task: Vec<_> = frontier
-        .drain()
-        .map(|(key, value)| (key.digest(), u256_to_bytes(&value)))
-        .collect();
-    init_task.shuffle(&mut rand::rng());
-
     let (read_cnt, write_cnt, update_cnt) = access_stat
         .iter()
         .fold((0, 0, 0), |(r_acc, w_acc, u_acc), (_, (r, w, u))| {
             (r_acc + r, w_acc + w, u_acc + u)
         });
-    println!("Final task {} r {} w {} u", read_cnt, write_cnt, update_cnt - write_cnt);
+    println!("Final task {} r {} w {} u", read_cnt, write_cnt, update_cnt);
 
     fs::create_dir_all(&opts.output).unwrap();
 
@@ -642,17 +604,25 @@ async fn seal(opts: &SealOptions) {
         }
     }
 
-    // Write the initial task to a file using write_trace
-    let init_task_path = Path::new(&opts.output).join("init_task.bin");
-    let init_task_c: Vec<C_Operation> = init_task
-        .iter()
-        .map(|(digest, value)| C_Operation {
-            address: u64::from_le_bytes(digest[0..8].try_into().unwrap()),
-            key: u64::from_le_bytes(digest[8..16].try_into().unwrap()),
+    let mut init_task_c: Vec<C_Operation> = frontier
+        .drain()
+        .map(|(slot, value)| C_Operation {
+            address: u64::from_le_bytes(slot.address.as_bytes()[0..8].try_into().unwrap()),
+            key: {
+                let mut encoded = [0u8; 32];
+                slot.slot.to_big_endian(&mut encoded);
+                u64::from_le_bytes(encoded[0..8].try_into().unwrap())
+            },
             is_read: 0,
-            value: value.clone().try_into().unwrap(),
+            value: {
+                let mut encoded = [0u8; 32];
+                value.to_big_endian(&mut encoded);
+                encoded
+            },
         })
         .collect();
+    init_task_c.shuffle(&mut rand::rng());
+    let init_task_path = Path::new(&opts.output).join("init_task_big.bin");
     let init_transaction = C_Transaction {
         key_from: 0,
         key_to: 0,
@@ -660,6 +630,62 @@ async fn seal(opts: &SealOptions) {
         n_ops: init_task_c.len() as u64,
     };
     write_trace(init_task_path.to_str().unwrap(), &[init_transaction], &[init_task_c]).expect("Failed to write init_task.bin");
+
+    let trace_task: Vec<_> = answer
+        .iter()
+        .flat_map(|block| {
+            block.iter().map(|(tx_info, ops)| {
+                let tx_c = C_Transaction {
+                    key_from: u64::from_le_bytes(tx_info.from.as_bytes()[0..8].try_into().unwrap()),
+                    key_to: u64::from_le_bytes(tx_info.to.unwrap_or_default().as_bytes()[0..8].try_into().unwrap()),
+                    is_regular: match tx_info.type_ {
+                        TransactionType::Regular => 1,
+                        _ => 0,
+                    },
+                    n_ops: ops.len() as u64,
+                };
+                let ops_c: Vec<C_Operation> = ops
+                    .iter()
+                    .map(|access| match access {
+                        DBAccess::Read(slot, value) => C_Operation {
+                            address: u64::from_le_bytes(slot.address.as_bytes()[0..8].try_into().unwrap()),
+                            key: {
+                                let mut encoded = [0u8; 32];
+                                slot.slot.to_big_endian(&mut encoded);
+                                u64::from_le_bytes(encoded[0..8].try_into().unwrap())
+                            },
+                            is_read: 1,
+                            value: {
+                                let mut encoded = [0u8; 32];
+                                value.to_big_endian(&mut encoded);
+                                encoded
+                            },
+                        },
+                        DBAccess::Write(slot, value) => C_Operation {
+                            address: u64::from_le_bytes(slot.address.as_bytes()[0..8].try_into().unwrap()),
+                            key: {
+                                let mut encoded = [0u8; 32];
+                                slot.slot.to_big_endian(&mut encoded);
+                                u64::from_le_bytes(encoded[0..8].try_into().unwrap())
+                            },
+                            is_read: 0,
+                            value: {
+                                let mut encoded = [0u8; 32];
+                                value.to_big_endian(&mut encoded);
+                                encoded
+                            },
+                        },
+                    })
+                    .collect();
+                (tx_c, ops_c)
+            })
+        })
+        .collect();
+
+    let trace_task_path = Path::new(&opts.output).join("trace_task_big.bin");
+    let transactions: Vec<C_Transaction> = trace_task.iter().map(|(tx, _)| tx.clone()).collect();
+    let operations: Vec<Vec<C_Operation>> = trace_task.iter().map(|(_, ops)| ops.clone()).collect();
+    write_trace(trace_task_path.to_str().unwrap(), &transactions, &operations).expect("Failed to write trace_task.bin");
 }
 
 #[tokio::main]
