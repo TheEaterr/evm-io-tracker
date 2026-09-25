@@ -9,6 +9,7 @@ pub enum Options {
     Fetch(FetchOptions),
     Combine(CombineOptions),
     Seal(SealOptions),
+    Analyze(AnalyzeOptions),
 }
 
 #[derive(Debug, StructOpt)]
@@ -57,6 +58,13 @@ pub struct SealOptions {
 
     #[structopt(long, default_value = "data")]
     pub output: String,
+}
+
+#[derive(Debug, StructOpt)]
+#[structopt(rename_all = "kebab-case")]
+pub struct AnalyzeOptions {
+    #[structopt(long)]
+    pub input: String,
 }
 
 #[derive(Debug, StructOpt)]

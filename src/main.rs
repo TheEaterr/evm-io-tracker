@@ -2,6 +2,7 @@ mod opcode;
 mod parse;
 mod utils;
 mod sort_accounts;
+mod analyze;
 
 use opts::{CombineOptions, FetchOptions, SealOptions};
 use ordermap::OrderSet;
@@ -27,7 +28,7 @@ use tiny_keccak::{Hasher, Keccak};
 use tokio::{task::JoinSet, time::Instant};
 use bytemuck::{Pod, Zeroable};
 
-use crate::{opts::{Options, SortAccountsOptions}, sort_accounts::get_addresses_in_block};
+use crate::{analyze::analyze_trace, opts::{AnalyzeOptions, Options, SortAccountsOptions}, sort_accounts::get_addresses_in_block, utils::write_data};
 mod opts;
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
@@ -35,6 +36,13 @@ pub struct SlotKey {
     pub address: Address,
     pub slot: U256,
 }
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub struct PageKey {
+    pub address: Address,
+    pub index: i32,
+}
+
 
 impl SlotKey {
     fn digest(&self) -> [u8; 32] {
@@ -257,13 +265,14 @@ async fn sort_accounts_main(opts: &SortAccountsOptions) {
     }
     // OrderSet<H160> doesn't implement serde::Serialize, convert to Vec<H160> first
     let new_addresses_vec: Vec<H160> = new_addresses.iter().cloned().collect();
-    write_to_file(&new_addresses_vec, format!("{}{}_{}.accounts", sorted_accounts_path, number, end_block - number));
+    write_data("data/account_list.bin", &new_addresses_vec).expect("Failed to write account list");
+    // write_to_file(&new_addresses_vec, format!("{}{}_{}.accounts", sorted_accounts_path, number, end_block - number));
 
-    // Remove previous file that was used to start the sorting, if it exists
-    if Path::new(&last_file_path).exists() {
-        fs::remove_file(&last_file_path).expect("Failed to remove previous accounts file");
-        println!("Removed previous accounts file: {}", last_file_path);
-    }
+    // // Remove previous file that was used to start the sorting, if it exists
+    // if Path::new(&last_file_path).exists() {
+    //     fs::remove_file(&last_file_path).expect("Failed to remove previous accounts file");
+    //     println!("Removed previous accounts file: {}", last_file_path);
+    // }
 
     std::mem::drop(provider);
     // sleep(std::cmp::min(elapsed / 3, Duration::from_secs(10))).await;
@@ -703,6 +712,9 @@ async fn main() {
         }
         Options::Seal(opts) => {
             seal(&opts).await;
+        }
+        Options::Analyze(opts) => {
+            analyze(&opts);
         }
     }
 }
